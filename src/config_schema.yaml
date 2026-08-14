@@ -165,3 +165,7 @@ misc:
     value: false
     type: bool
     description: "Set to true to play a noise after the transcription has been typed out."
+  auto_start_listening:
+    value: false
+    type: bool
+    description: "Set to true to automatically start listening on launch without showing the main window."
