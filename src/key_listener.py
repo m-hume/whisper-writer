@@ -262,14 +262,24 @@ class KeyChord:
         return self.is_active()
 
     def is_active(self) -> bool:
-        """Check if all keys in the chord are currently pressed."""
+        """Check if exactly the keys in the chord are currently pressed (no extra keys)."""
+        # Check that all chord keys are pressed
         for key in self.keys:
             if isinstance(key, frozenset):
                 if not any(k in self.pressed_keys for k in key):
                     return False
             elif key not in self.pressed_keys:
                 return False
-        return True
+
+        # Check that no extra keys are pressed (exact match)
+        valid_keys = set()
+        for key in self.keys:
+            if isinstance(key, frozenset):
+                valid_keys.update(key)
+            else:
+                valid_keys.add(key)
+
+        return not (self.pressed_keys - valid_keys)
 
 class KeyListener:
     """
