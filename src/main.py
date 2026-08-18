@@ -1,6 +1,11 @@
 import os
 import sys
 import time
+# Import faster_whisper (and thus CTranslate2's native runtime) BEFORE PyQt5.
+# On Windows + NVIDIA GPU, importing PyQt5 first causes an access violation when
+# CTranslate2 later loads the model on CUDA (conflicting OpenMP runtimes). Loading
+# CTranslate2's libraries first avoids the crash.
+import faster_whisper  # noqa: F401  (import order matters; do not move below PyQt5)
 from audioplayer import AudioPlayer
 from pynput.keyboard import Controller
 from PyQt5.QtCore import QObject, QProcess
@@ -43,10 +48,12 @@ class WhisperWriterApp(QObject):
         Initialize the components of the application.
         """
         self.input_simulator = InputSimulator()
+        self.last_transcription = None
 
         self.key_listener = KeyListener()
-        self.key_listener.add_callback("on_activate", self.on_activation)
-        self.key_listener.add_callback("on_deactivate", self.on_deactivation)
+        self.key_listener.add_callback("activation", "on_activate", self.on_activation)
+        self.key_listener.add_callback("activation", "on_deactivate", self.on_deactivation)
+        self.key_listener.add_callback("repaste", "on_activate", self.on_repaste)
 
         model_options = ConfigManager.get_config_section('model_options')
         model_path = model_options.get('local', {}).get('model_path')
@@ -170,6 +177,8 @@ class WhisperWriterApp(QObject):
         """
         When the transcription is complete, type the result and start listening for the activation key again.
         """
+        if result:
+            self.last_transcription = result
         self.input_simulator.typewrite(result)
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
@@ -179,6 +188,17 @@ class WhisperWriterApp(QObject):
             self.start_result_thread()
         else:
             self.key_listener.start()
+
+    def on_repaste(self):
+        """
+        Re-insert the last transcribed text.
+        """
+        if self.result_thread and self.result_thread.isRunning():
+            return
+        if self.last_transcription:
+            self.input_simulator.release_held_modifiers()
+            time.sleep(0.05)
+            self.input_simulator.typewrite(self.last_transcription)
 
     def run(self):
         """
