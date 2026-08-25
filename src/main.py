@@ -105,10 +105,12 @@ class WhisperWriterApp(QObject):
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
 
-        # Poll microphone availability every 3 seconds and reflect it in the tray.
+        # Poll microphone availability and reflect it in the tray.
+        # Use a longer interval when connected (10s) to avoid excessive
+        # PowerShell process spawning. Faster (5s) when disconnected.
         self.mic_timer = QTimer(self.app)
         self.mic_timer.timeout.connect(self.check_microphone_status)
-        self.mic_timer.start(3000)
+        self.mic_timer.start(10000)
         self.check_microphone_status()
 
     def _is_dark_theme(self):
@@ -181,41 +183,41 @@ class WhisperWriterApp(QObject):
             if not is_recording:
                 self.tray_icon.setIcon(self.mic_connected_icon)
             self.tray_icon.setToolTip(f"WhisperWriter — Mic: {device_name}")
+            # Slow down polling when connected — no need to check often
+            self.mic_timer.setInterval(10000)
         elif state == 'pending':
             self.tray_icon.setIcon(self.mic_pending_icon)
             self.tray_icon.setToolTip("WhisperWriter — Headset connected, waiting for audio...")
+            # Poll moderately while waiting for audio
+            self.mic_timer.setInterval(5000)
         else:
             self.tray_icon.setIcon(self.mic_disconnected_icon)
             self.tray_icon.setToolTip("WhisperWriter — No microphone detected")
-
-        # Start/restart the BT worker whenever we're not fully connected.
-        # The worker updates self.bt_connected and tries to trigger reconnection.
-        # It stops itself once we reach 'connected', so we need to start it again
-        # on the next disconnect.
-        if state != 'connected' and not getattr(self, '_bt_worker_running', False):
-            self._trigger_bt_reconnect()
+            # Poll moderately when disconnected
+            self.mic_timer.setInterval(5000)
+            # Start/restart the BT worker whenever we're not fully connected.
+            # The worker updates self.bt_connected and tries to trigger reconnection.
+            # It stops itself once we reach 'connected', so we need to start it again
+            # on the next disconnect.
+            if not getattr(self, '_bt_worker_running', False):
+                self._trigger_bt_reconnect()
 
     def _is_pnp_device_ok(self, device_name):
         """
         Check whether the AudioEndpoint PnP device matching device_name has
-        Status 'OK' (connected) vs 'Unknown' (disconnected). Returns True if
-        the device is present and OK, False otherwise.
+        Status 'OK' (connected) vs 'Unknown' (disconnected). Uses a compiled
+        C helper (pnp_status.exe) for minimal overhead vs PowerShell.
         """
         if not device_name:
             return False
         try:
-            ps_cmd = (
-                "Get-PnpDevice -Class AudioEndpoint | "
-                f"Where-Object {{ $_.FriendlyName -eq '{device_name}' }} | "
-                "Select-Object -ExpandProperty Status"
-            )
+            exe = os.path.join('src', 'pnp_status.exe')
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                [exe, device_name],
                 capture_output=True, text=True, timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            status = result.stdout.strip()
-            return status == 'OK'
+            return result.stdout.strip() == 'OK'
         except Exception:
             return False
 
@@ -421,7 +423,7 @@ class WhisperWriterApp(QObject):
             else:
                 self.bt_connected = False
 
-            time.sleep(1)
+            time.sleep(3)
 
         bthprops.BluetoothFindRadioClose(radio_handle)
         self._bt_worker_running = False
@@ -449,28 +451,22 @@ class WhisperWriterApp(QObject):
             if '(' in mic_name and ')' in mic_name:
                 search_name = mic_name[mic_name.index('(') + 1:mic_name.index(')')]
 
-            # Search for Bluetooth devices matching the name
-            safe_name = search_name.replace("'", "''")
-            ps_cmd = (
-                "Get-PnpDevice -Class Bluetooth | "
-                f"Where-Object {{ $_.FriendlyName -like '*{safe_name}*' }} | "
-                "Select-Object -ExpandProperty InstanceId"
-            )
+            # Use the C helper to get the InstanceId
+            exe = os.path.join('src', 'pnp_status.exe')
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                [exe, '--instanceid', search_name, 'Bluetooth'],
                 capture_output=True, text=True, timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            for line in result.stdout.split('\n'):
-                line = line.strip()
-                if 'DEV_' in line:
-                    parts = line.split('DEV_')
-                    if len(parts) > 1:
-                        addr_str = parts[1].split('\\')[0].split('_')[0]
-                        try:
-                            return int(addr_str, 16)
-                        except ValueError:
-                            pass
+            line = result.stdout.strip()
+            if 'DEV_' in line:
+                parts = line.split('DEV_')
+                if len(parts) > 1:
+                    addr_str = parts[1].split('\\')[0].split('_')[0]
+                    try:
+                        return int(addr_str, 16)
+                    except ValueError:
+                        pass
         except Exception:
             pass
         return None
